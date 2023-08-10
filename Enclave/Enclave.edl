@@ -16,6 +16,14 @@ enclave {
             [out, size=sealedkeypair_size] char* sealedkeypair, 
             size_t sealedkeypair_size);
 
+        public sgx_status_t generate_new_keypair(
+            [in, size=client_pubkey_size] unsigned char* serialized_client_pubkey, 
+            size_t client_pubkey_size,
+            [out, size=compressed_server_pubkey_size] unsigned char *compressed_server_pubkey, 
+            size_t compressed_server_pubkey_size, 
+            [out, size=sealedkeypair_size] char* sealedkeypair, 
+            size_t sealedkeypair_size);
+
         public sgx_status_t unseal(
             [in, size=sealed_size] char* sealed, size_t sealed_size,
             [out, size=keypair_data_size] unsigned char *keypair_data, size_t keypair_data_size);

@@ -37,6 +37,51 @@ uint32_t sgx_calc_sealed_data_size(const uint32_t add_mac_txt_size, const uint32
     return (uint32_t)(sizeof(sgx_sealed_data_t) + payload_size);
 }
 
+
+bool save_generated_public_key(
+    char* sealed, size_t sealed_size, 
+    unsigned char* server_public_key, size_t server_public_key_size,
+    std::string& error_message) 
+{
+    try
+    {
+         pqxx::connection conn("postgresql://postgres:postgres@localhost/sgx");
+        if (conn.is_open()) {
+
+            std::string create_table_query =
+                "CREATE TABLE IF NOT EXISTS generated_public_keys ( "
+                "id SERIAL PRIMARY KEY, "
+                "sealed_keypair BYTEA, "
+                "public_key BYTEA);";
+
+            pqxx::work txn(conn);
+            txn.exec(create_table_query);
+            txn.commit();
+
+            std::basic_string_view<std::byte> sealed_data_view(reinterpret_cast<std::byte*>(sealed), sealed_size);
+            std::basic_string_view<std::byte> public_key_data_view(reinterpret_cast<std::byte*>(server_public_key), server_public_key_size);
+
+            std::string insert_query =
+                "INSERT INTO generated_public_keys (sealed_keypair, public_key) VALUES ($1, $2);";
+            pqxx::work txn2(conn);
+
+            txn2.exec_params(insert_query, sealed_data_view, public_key_data_view);
+            txn2.commit();
+
+            conn.close();
+            return true;
+        } else {
+            error_message = "Failed to connect to the database!";
+            return false;
+        }
+    }
+    catch (std::exception const &e)
+    {
+        error_message = e.what();
+        return false;
+    }
+}
+
 bool save_aggregated_key_data(
     char* sealed, size_t sealed_size, 
     unsigned char* aggregated_pubkey, size_t aggregated_pubkey_size,
@@ -173,6 +218,68 @@ int SGX_CDECL main(int argc, char *argv[])
             return -1;
         }
     }
+
+    CROW_ROUTE(app, "/get_public_key")
+        .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
+
+            auto req_body = crow::json::load(req.body);
+            if (!req_body)
+                return crow::response(400);
+
+            if (req_body.count("client_pubkey") == 0)
+                return crow::response(400, "Invalid parameter. It must be 'client_pubkey'.");
+
+            std::string client_pubkey_hex = req_body["client_pubkey"].s();
+
+            // Check if the string starts with 0x and remove it if necessary
+            if (client_pubkey_hex.substr(0, 2) == "0x") {
+                client_pubkey_hex = client_pubkey_hex.substr(2);
+            }
+
+            std::vector<unsigned char> client_pubkey_serialized = ParseHex(client_pubkey_hex);
+
+            // 1. Allocate memory for the aggregated pubkey and sealedprivkey.
+            size_t server_pubkey_size = 33; // serialized compressed public keys are 33-byte array
+            unsigned char server_pubkey[server_pubkey_size];
+
+            // size_t sealedprivkey_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
+            // std::vector<char> sealedprivkey(sealedprivkey_size);  // Using a vector to manage dynamic-sized array.
+
+            size_t sealedprivkey_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
+            char sealedprivkey[sealedprivkey_size];
+
+            const std::lock_guard<std::mutex> lock(mutex_enclave_id);
+
+            sgx_status_t ecall_ret;
+            sgx_status_t status = generate_new_keypair(
+                enclave_id, &ecall_ret, 
+                client_pubkey_serialized.data(), client_pubkey_serialized.size(),
+                server_pubkey, server_pubkey_size,
+                // sealedprivkey.data(), sealedprivkey_size);
+                sealedprivkey, sealedprivkey_size);
+
+            if (ecall_ret != SGX_SUCCESS) {
+                return crow::response(500, "Key aggregation Ecall failed ");
+            }  if (status != SGX_SUCCESS) {
+                return crow::response(500, "Key aggregation failed ");
+            }
+
+            auto server_seckey_hex = key_to_string(server_pubkey, server_pubkey_size);
+
+            std::string error_message;
+            bool data_saved = save_generated_public_key(
+                // sealedprivkey.data(), sealedprivkey.size(), server_pubkey, server_pubkey_size, error_message);
+                sealedprivkey, sealedprivkey_size, server_pubkey, server_pubkey_size, error_message);
+
+            if (!data_saved) {
+                error_message = "Failed to save aggregated key data: " + error_message;
+                return crow::response(500, error_message);
+            }
+
+            crow::json::wvalue result({{"server_pubkey", server_seckey_hex}});
+            return crow::response{result};
+
+    });
 
     CROW_ROUTE(app, "/key_aggregation")
         .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
