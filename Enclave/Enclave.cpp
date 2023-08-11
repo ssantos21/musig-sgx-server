@@ -217,11 +217,11 @@ sgx_status_t generate_new_keypair(
     return ret;
 }
 
-sgx_status_t unseal(char* sealed, size_t sealed_size, unsigned char *keypair_data, size_t keypair_data_size)
+sgx_status_t unseal(char* sealed, size_t sealed_size, unsigned char *raw_data, size_t raw_data_size)
 {
     // silent [-Wunused-parameter] warning
     (void)sealed_size;
-    (void)keypair_data_size;
+    (void)raw_data_size;
 
     sgx_status_t ret = SGX_ERROR_UNEXPECTED;
 
@@ -249,7 +249,7 @@ sgx_status_t unseal(char* sealed, size_t sealed_size, unsigned char *keypair_dat
 
     ret = SGX_SUCCESS;
 
-    memcpy(keypair_data, unsealed_data, keypair_data_size);
+    memcpy(raw_data, unsealed_data, raw_data_size);
 
     return ret;
 }
@@ -344,4 +344,72 @@ sgx_status_t partial_signature(
     secp256k1_context_destroy(ctx);
 
     return SGX_SUCCESS;
+}
+
+sgx_status_t generate_nonce(
+    unsigned char* msg, size_t msg_size,
+    char* sealed_keypair, size_t sealed_keypair_size,
+    char* sealed_secnonce, size_t sealed_secnonce_size,
+    unsigned char* server_pubnonce_data, size_t server_pubnonce_data_size)
+{
+    // TODO: replace with assert
+    (void) msg_size;
+    (void) sealed_keypair_size;
+    (void) sealed_secnonce_size;
+    (void) server_pubnonce_data_size;
+
+    secp256k1_keypair server_keypair;
+    unseal(sealed_keypair, sealed_keypair_size, server_keypair.data, sizeof(server_keypair.data));
+
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+
+    // step 1 - Extract server secret and public keys from keypair
+
+    unsigned char server_seckey[32];
+    int return_val = secp256k1_keypair_sec(ctx, server_seckey, &server_keypair);
+    assert(return_val);
+
+    secp256k1_pubkey server_pubkey;
+    return_val = secp256k1_keypair_pub(ctx, &server_pubkey, &server_keypair);
+    assert(return_val);
+
+    // step 2 - Generate secret and public nonce
+
+    unsigned char session_id[32];
+    memset(session_id, 0, 32);
+    sgx_read_rand(session_id, sizeof(session_id));
+
+    secp256k1_musig_pubnonce server_pubnonce;
+    secp256k1_musig_secnonce server_secnonce;
+
+    return_val = secp256k1_musig_nonce_gen(ctx, &server_secnonce, &server_pubnonce, session_id, server_seckey, &server_pubkey, msg, NULL, NULL);
+    assert(return_val);
+
+    // step 3 - Seal secret nonce
+
+    sgx_status_t ret = SGX_ERROR_UNEXPECTED;
+
+    if (sealed_secnonce_size >= sgx_calc_sealed_data_size(0U, sizeof(server_secnonce.data)))
+    {
+        if ((ret = sgx_seal_data(0U, NULL, sizeof(server_secnonce.data), server_secnonce.data, (uint32_t) sealed_secnonce_size, (sgx_sealed_data_t *)sealed_secnonce)) != SGX_SUCCESS)
+        {
+            ocall_print_string("\nTrustedApp: sgx_seal_data() failed !\n");
+        }
+    }
+    else
+    {
+        ocall_print_string("\nTrustedApp: Size allocated for sealedprivkey by untrusted app is less than the required size !\n");
+        ret = SGX_ERROR_INVALID_PARAMETER;
+    }
+
+    unsigned char serialized_server_pubnonce[66];
+    return_val = secp256k1_musig_pubnonce_serialize(ctx, serialized_server_pubnonce, &server_pubnonce);
+    assert(return_val);
+
+    memcpy(server_pubnonce_data, serialized_server_pubnonce, sizeof(serialized_server_pubnonce));
+
+    secp256k1_context_destroy(ctx);
+
+    return ret;
+    
 }

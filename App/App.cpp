@@ -49,10 +49,11 @@ bool save_generated_public_key(
         if (conn.is_open()) {
 
             std::string create_table_query =
-                "CREATE TABLE IF NOT EXISTS generated_public_keys ( "
+                "CREATE TABLE IF NOT EXISTS generated_public_key ( "
                 "id SERIAL PRIMARY KEY, "
                 "sealed_keypair BYTEA, "
-                "public_key BYTEA);";
+                "sealed_secnonce BYTEA, "
+                "public_key BYTEA UNIQUE);";
 
             pqxx::work txn(conn);
             txn.exec(create_table_query);
@@ -62,11 +63,113 @@ bool save_generated_public_key(
             std::basic_string_view<std::byte> public_key_data_view(reinterpret_cast<std::byte*>(server_public_key), server_public_key_size);
 
             std::string insert_query =
-                "INSERT INTO generated_public_keys (sealed_keypair, public_key) VALUES ($1, $2);";
+                "INSERT INTO generated_public_key (sealed_keypair, public_key) VALUES ($1, $2);";
             pqxx::work txn2(conn);
 
             txn2.exec_params(insert_query, sealed_data_view, public_key_data_view);
             txn2.commit();
+
+            conn.close();
+            return true;
+        } else {
+            error_message = "Failed to connect to the database!";
+            return false;
+        }
+    }
+    catch (std::exception const &e)
+    {
+        error_message = e.what();
+        return false;
+    }
+}
+
+bool load_generated_key_data(
+    unsigned char* server_pubkey, const size_t server_pubkey_size, 
+    char* sealed_keypair, size_t sealed_keypair_size,
+    char* sealed_secnonce, size_t sealed_secnonce_size,
+    std::string& error_message)
+{
+    try
+    {
+        pqxx::connection conn("postgresql://postgres:postgres@localhost/sgx");
+        if (conn.is_open()) {
+
+            std::basic_string_view<std::byte> server_pubkey_data_view(reinterpret_cast<std::byte*>(server_pubkey), server_pubkey_size);
+
+            std::string sealed_keypair_query =
+                "SELECT sealed_keypair, sealed_secnonce FROM generated_public_key WHERE public_key = $1;";
+
+            pqxx::nontransaction ntxn(conn);
+
+            conn.prepare("load_generated_key_data_query", sealed_keypair_query);
+
+            pqxx::result result = ntxn.exec_prepared("load_generated_key_data_query", server_pubkey_data_view);
+
+            if (!result.empty()) {
+                auto sealed_keypair_field = result[0]["sealed_keypair"];
+                auto sealed_secnonce_field = result[0]["sealed_secnonce"];
+
+                if (!sealed_keypair_field.is_null()) {
+                    auto sealed_keypair_view = sealed_keypair_field.as<std::basic_string<std::byte>>();
+                    
+                    if (sealed_keypair_view.size() != sealed_keypair_size) {
+                        error_message = "Failed to retrieve keypair. Different size than expected !";
+                        return false;
+                    }
+
+                    memcpy(sealed_keypair, sealed_keypair_view.data(), sealed_keypair_size);
+                }
+
+                if (!sealed_secnonce_field.is_null()) {
+                    auto sealed_secnonce_view = sealed_secnonce_field.as<std::basic_string<std::byte>>();
+
+                    if (sealed_secnonce_view.size() != sealed_secnonce_size) {
+                        error_message = "Failed to retrieve secret nonce. Different size than expected !";
+                        return false;
+                    }
+
+                    memcpy(sealed_secnonce, sealed_secnonce_view.data(), sealed_secnonce_size);
+                }
+            }
+            else {
+                error_message = "Failed to retrieve keypair. No data found !";
+                return false;
+            }
+
+            conn.close();
+            return true;
+        } else {
+            error_message = "Failed to connect to the database!";
+            return false;
+        }
+    }
+    catch (std::exception const &e)
+    {
+        error_message = e.what();
+        return false;
+    }
+}
+
+bool update_sealed_secnonce(
+    unsigned char* server_pubkey, const size_t server_pubkey_size, 
+    char* sealed_secnonce, size_t sealed_secnonce_size,
+    std::string& error_message
+)
+{
+    try
+    {
+        pqxx::connection conn("postgresql://postgres:postgres@localhost/sgx");
+        if (conn.is_open()) {
+
+            std::basic_string_view<std::byte> sealed_secnonce_data_view(reinterpret_cast<std::byte*>(sealed_secnonce), sealed_secnonce_size);
+            std::basic_string_view<std::byte> public_key_data_view(reinterpret_cast<std::byte*>(server_pubkey), server_pubkey_size);
+
+            std::string updated_query =
+                "UPDATE generated_public_key SET sealed_secnonce = $1 WHERE public_key = $2";
+            pqxx::work txn(conn);
+
+            txn.exec_params(updated_query, sealed_secnonce_data_view, public_key_data_view);
+            txn.commit();
 
             conn.close();
             return true;
@@ -279,6 +382,106 @@ int SGX_CDECL main(int argc, char *argv[])
             crow::json::wvalue result({{"server_pubkey", server_seckey_hex}});
             return crow::response{result};
 
+    });
+
+    CROW_ROUTE(app, "/get_public_nonce")
+        .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
+
+            auto req_body = crow::json::load(req.body);
+            if (!req_body)
+                return crow::response(400);
+
+            if (req_body.count("server_public_pubkey") == 0 || 
+                req_body.count("message_hash") == 0) {
+                return crow::response(400, "Invalid parameters. They must be 'server_public_pubkey' and 'message_hash'.");
+            }
+
+            std::string server_public_pubkey_hex = req_body["server_public_pubkey"].s();
+            std::string message_hash = req_body["message_hash"].s();
+
+            // Check if the string starts with 0x and remove it if necessary
+            if (server_public_pubkey_hex.substr(0, 2) == "0x") {
+                server_public_pubkey_hex = server_public_pubkey_hex.substr(2);
+            }
+
+            std::vector<unsigned char> serialized_server_public_pubkey = ParseHex(server_public_pubkey_hex);
+
+            if (serialized_server_public_pubkey.size() != 33) {
+                return crow::response(400, "Invalid server public pubkey length. Must be 33 bytes (compressed)!");
+            }
+
+            size_t sealed_keypair_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
+            std::vector<char> sealed_keypair(sealed_keypair_size);  // Using a vector to manage dynamic-sized array.
+
+            size_t sealed_secnonce_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_musig_secnonce));
+            std::vector<char> sealed_secnonce(sealed_secnonce_size);  // Using a vector to manage dynamic-sized array.
+
+            memset(sealed_keypair.data(), 0, sealed_keypair_size);
+            memset(sealed_secnonce.data(), 0, sealed_secnonce_size);
+
+            // std::cout << "sealed_keypair.data 1:  " << key_to_string(reinterpret_cast<unsigned char*>(sealed_keypair.data()), sealed_keypair_size) << std::endl;
+            // std::cout << "sealed_secnonce.data 1: " << key_to_string(reinterpret_cast<unsigned char*>(sealed_secnonce.data()), sealed_secnonce_size) << std::endl;
+
+            std::string error_message;
+            bool data_loaded = load_generated_key_data(
+                serialized_server_public_pubkey.data(), serialized_server_public_pubkey.size(), 
+                sealed_keypair.data(), sealed_keypair_size,
+                sealed_secnonce.data(), sealed_secnonce_size,
+                error_message);
+
+            if (!data_loaded) {
+                error_message = "Failed to load aggregated key data: " + error_message;
+                return crow::response(500, error_message);
+            }
+
+            // std::cout << "sealed_keypair.data 2:  " << key_to_string(reinterpret_cast<unsigned char*>(sealed_keypair.data()), sealed_keypair_size) << std::endl;
+            // std::cout << "sealed_secnonce.data 2: " << key_to_string(reinterpret_cast<unsigned char*>(sealed_secnonce.data()), sealed_secnonce_size) << std::endl;
+
+            if (message_hash.substr(0, 2) == "0x") {
+                message_hash = message_hash.substr(2);
+            }
+
+            if (message_hash.size() != 64) {
+                return crow::response(400, "Invalid message hash length. Must be 32 bytes!");
+            }
+
+            unsigned char msg[32];
+            if (!hex_to_bytes(message_hash, msg)) {
+                return crow::response(400, "Invalid message hash!");
+            }
+
+            memset(sealed_secnonce.data(), 0, sealed_secnonce_size);
+            unsigned char serialized_server_pubnonce[66];
+
+            sgx_status_t ecall_ret;
+            sgx_status_t status = generate_nonce(
+                enclave_id, &ecall_ret, 
+                msg, sizeof(msg),
+                sealed_keypair.data(), sealed_keypair_size,
+                sealed_secnonce.data(), sealed_secnonce_size,
+                serialized_server_pubnonce, 66);
+
+            if (ecall_ret != SGX_SUCCESS) {
+                return crow::response(500, "Generate Nonce Ecall failed ");
+            }  if (status != SGX_SUCCESS) {
+                return crow::response(500, "Generate Nonce failed ");
+            }
+
+            bool data_saved = update_sealed_secnonce(
+                serialized_server_public_pubkey.data(), serialized_server_public_pubkey.size(), 
+                sealed_secnonce.data(), sealed_secnonce_size,
+                error_message
+            );
+
+            if (!data_saved) {
+                error_message = "Failed to save sealed secret nonce: " + error_message;
+                return crow::response(500, error_message);
+            }
+
+            auto serialized_server_pubnonce_hex = key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce));
+
+            crow::json::wvalue result({{"server_pubnonce", serialized_server_pubnonce_hex}});
+            return crow::response{result};
     });
 
     CROW_ROUTE(app, "/key_aggregation")
