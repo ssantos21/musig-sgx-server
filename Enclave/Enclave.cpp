@@ -406,6 +406,11 @@ sgx_status_t generate_nonce(
     return_val = secp256k1_musig_pubnonce_serialize(ctx, serialized_server_pubnonce, &server_pubnonce);
     assert(return_val);
 
+    ocall_print_string("--- serialized_server_pubnonce:");
+    int size14 = sizeof(serialized_server_pubnonce);
+    const unsigned char* serialized_server_pubnonce_hexx = serialized_server_pubnonce;
+    ocall_print_hex(&serialized_server_pubnonce_hexx, &size14);
+
     memcpy(server_pubnonce_data, serialized_server_pubnonce, sizeof(serialized_server_pubnonce));
 
     secp256k1_context_destroy(ctx);
