@@ -542,13 +542,13 @@ int SGX_CDECL main(int argc, char *argv[])
             std::vector<unsigned char> serialized_cache = ParseHex(cache_hex);
 
             if (serialized_cache.size() != 197) {
-                return crow::response(400, "Invalid cache length. Must be 96 bytes!");
+                return crow::response(400, "Invalid cache length. Must be 197 bytes!");
             }
 
             std::vector<unsigned char> serialized_session = ParseHex(session_hex);
 
             if (serialized_session.size() != 133) {
-                return crow::response(400, "Invalid session length. Must be 32 bytes!");
+                return crow::response(400, "Invalid session length. Must be 133 bytes!");
             }
 
             size_t sealed_keypair_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
@@ -585,7 +585,30 @@ int SGX_CDECL main(int argc, char *argv[])
 
             std::cout << "serialized_server_pubnonce:  " << key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce)) << std::endl;
 
-            crow::json::wvalue result({{"xxxx", "yyyy"}});
+            // secp256k1_musig_keyagg_cache cache;
+            // memcpy(cache.data, serialized_cache.data(), serialized_cache.size());
+
+            unsigned char serialized_partial_sig[32];
+
+            sgx_status_t ecall_ret;
+            sgx_status_t status = get_partial_signature(
+                enclave_id, &ecall_ret, 
+                sealed_keypair.data(), sealed_keypair_size,
+                sealed_secnonce.data(), sealed_secnonce_size,
+                serialized_cache.data(), serialized_cache.size(),
+                serialized_session.data(), serialized_session.size(),
+                serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
+                serialized_partial_sig, sizeof(serialized_partial_sig));
+
+            if (ecall_ret != SGX_SUCCESS) {
+                return crow::response(500, "Generate Signature Ecall failed ");
+            }  if (status != SGX_SUCCESS) {
+                return crow::response(500, "Generate Signature failed ");
+            }
+
+            auto partial_sig_hex = key_to_string(serialized_partial_sig, sizeof(serialized_partial_sig));
+
+            crow::json::wvalue result({{"partial_sig", partial_sig_hex}});
             return crow::response{result};
 
     });
