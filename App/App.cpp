@@ -509,112 +509,6 @@ int SGX_CDECL main(int argc, char *argv[])
                 return crow::response(400);
 
             if (req_body.count("server_public_pubkey") == 0 || 
-                req_body.count("cache") == 0 ||
-                req_body.count("session") == 0) {
-                return crow::response(400, "Invalid parameters. They must be 'server_public_pubkey', 'cache' and 'session'.");
-            }
-
-            std::string server_public_pubkey_hex = req_body["server_public_pubkey"].s();
-            std::string cache_hex = req_body["cache"].s();
-            std::string session_hex = req_body["session"].s();
-
-            if (server_public_pubkey_hex.substr(0, 2) == "0x") {
-                server_public_pubkey_hex = server_public_pubkey_hex.substr(2);
-            }
-
-            if (cache_hex.substr(0, 2) == "0x") {
-                cache_hex = cache_hex.substr(2);
-            }
-
-            if (session_hex.substr(0, 2) == "0x") {
-                session_hex = session_hex.substr(2);
-            }
-
-            std::vector<unsigned char> serialized_server_public_pubkey = ParseHex(server_public_pubkey_hex);
-
-            if (serialized_server_public_pubkey.size() != 33) {
-                return crow::response(400, "Invalid server public pubkey length. Must be 33 bytes (compressed)!");
-            }
-
-            std::vector<unsigned char> serialized_cache = ParseHex(cache_hex);
-
-            if (serialized_cache.size() != 197) {
-                return crow::response(400, "Invalid cache length. Must be 197 bytes!");
-            }
-
-            std::vector<unsigned char> serialized_session = ParseHex(session_hex);
-
-            if (serialized_session.size() != 133) {
-                return crow::response(400, "Invalid session length. Must be 133 bytes!");
-            }
-
-            size_t sealed_keypair_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
-            std::vector<char> sealed_keypair(sealed_keypair_size);  // Using a vector to manage dynamic-sized array.
-
-            size_t sealed_secnonce_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_musig_secnonce));
-            std::vector<char> sealed_secnonce(sealed_secnonce_size);  // Using a vector to manage dynamic-sized array.
-
-            unsigned char serialized_server_pubnonce[66];
-
-            memset(sealed_keypair.data(), 0, sealed_keypair_size);
-            memset(sealed_secnonce.data(), 0, sealed_secnonce_size);
-            memset(serialized_server_pubnonce, 0, sizeof(serialized_server_pubnonce));
-
-            std::string error_message;
-            bool data_loaded = load_generated_key_data(
-                serialized_server_public_pubkey.data(), serialized_server_public_pubkey.size(), 
-                sealed_keypair.data(), sealed_keypair_size,
-                sealed_secnonce.data(), sealed_secnonce_size,
-                serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
-                error_message);
-
-            if (!data_loaded) {
-                error_message = "Failed to load aggregated key data: " + error_message;
-                return crow::response(500, error_message);
-            }
-
-            bool is_sealed_keypair_empty = std::all_of(sealed_keypair.begin(), sealed_keypair.end(), [](char elem){ return elem == 0; });
-            bool is_sealed_secnonce_empty = std::all_of(sealed_secnonce.begin(), sealed_secnonce.end(), [](char elem){ return elem == 0; });
-
-            if (is_sealed_keypair_empty || is_sealed_secnonce_empty) {
-                return crow::response(400, "Empty sealed keypair or sealed secnonce!");
-            }
-
-            std::cout << "serialized_server_pubnonce:  " << key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce)) << std::endl;
-
-            unsigned char serialized_partial_sig[32];
-
-            sgx_status_t ecall_ret;
-            sgx_status_t status = get_partial_signature(
-                enclave_id, &ecall_ret, 
-                sealed_keypair.data(), sealed_keypair_size,
-                sealed_secnonce.data(), sealed_secnonce_size,
-                serialized_cache.data(), serialized_cache.size(),
-                serialized_session.data(), serialized_session.size(),
-                serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
-                serialized_partial_sig, sizeof(serialized_partial_sig));
-
-            if (ecall_ret != SGX_SUCCESS) {
-                return crow::response(500, "Generate Signature Ecall failed ");
-            }  if (status != SGX_SUCCESS) {
-                return crow::response(500, "Generate Signature failed ");
-            }
-
-            auto partial_sig_hex = key_to_string(serialized_partial_sig, sizeof(serialized_partial_sig));
-
-            crow::json::wvalue result({{"partial_sig", partial_sig_hex}});
-            return crow::response{result};
-
-    });
-
-    CROW_ROUTE(app, "/get_blinded_partial_signature")
-        .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
-
-            auto req_body = crow::json::load(req.body);
-            if (!req_body)
-                return crow::response(400);
-
-            if (req_body.count("server_public_pubkey") == 0 || 
                 req_body.count("keyaggcoef") == 0 ||
                 req_body.count("negate_seckey") == 0 ||
                 req_body.count("session") == 0) {
@@ -625,11 +519,6 @@ int SGX_CDECL main(int argc, char *argv[])
             std::string keyaggcoef_hex = req_body["keyaggcoef"].s();
             int64_t negate_seckey = req_body["negate_seckey"].i();
             std::string session_hex = req_body["session"].s();
-
-            std::cout << "server_public_pubkey_hex: " << server_public_pubkey_hex << std::endl;
-            std::cout << "keyaggcoef_hex: " << keyaggcoef_hex << std::endl;
-            std::cout << "negate_seckey: " << negate_seckey << std::endl;
-            std::cout << "session_hex: " << session_hex << std::endl;
 
             if (server_public_pubkey_hex.substr(0, 2) == "0x") {
                 server_public_pubkey_hex = server_public_pubkey_hex.substr(2);
@@ -693,12 +582,10 @@ int SGX_CDECL main(int argc, char *argv[])
                 return crow::response(400, "Empty sealed keypair or sealed secnonce!");
             }
 
-            std::cout << "serialized_server_pubnonce:  " << key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce)) << std::endl;
-
             unsigned char serialized_partial_sig[32];
 
             sgx_status_t ecall_ret;
-            sgx_status_t status = get_blinded_partial_signature(
+            sgx_status_t status = get_partial_signature(
                 enclave_id, &ecall_ret, 
                 sealed_keypair.data(), sealed_keypair_size,
                 sealed_secnonce.data(), sealed_secnonce_size,

@@ -10,128 +10,6 @@
 #include "sgx_trts.h"
 #include "sgx_tseal.h"
 
-sgx_status_t key_aggregation(
-    unsigned char* serialized_client_pubkey, 
-    size_t client_pubkey_size,
-
-    unsigned char *compressed_server_pubkey, 
-    size_t compressed_server_pubkey_size, 
-    
-    unsigned char *compressed_aggregated_pubkey, 
-    size_t compressed_aggregated_pubkey_size, 
-
-    unsigned char* keyagg_cache, 
-    size_t keyagg_cache_size,
-    
-    char *sealedkeypair, 
-    size_t sealedkeypair_size)
-{
-    (void) compressed_server_pubkey_size;
-    (void) compressed_aggregated_pubkey_size;
-    (void) keyagg_cache_size;
-
-    // Step 1: Open Context.
-    sgx_status_t ret = SGX_ERROR_UNEXPECTED;
-    sgx_ecc_state_handle_t p_ecc_handle = NULL;
-
-    if ((ret = sgx_ecc256_open_context(&p_ecc_handle)) != SGX_SUCCESS)
-    {
-        ocall_print_string("\nTrustedApp: sgx_ecc256_open_context() failed !\n");
-        if (p_ecc_handle != NULL)
-        {
-            sgx_ecc256_close_context(p_ecc_handle);
-        }
-        return ret;
-    }
-
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
-
-    // serialized_client_pubkey MUST be validated before this function
-    secp256k1_pubkey client_pubkey;
-    int return_val = secp256k1_ec_pubkey_parse(ctx, &client_pubkey, serialized_client_pubkey, client_pubkey_size);
-    assert(return_val);
-
-    unsigned char server_privkey[32];
-    memset(server_privkey, 0, 32);
-
-    do {
-        sgx_read_rand(server_privkey, 32);
-    } while (!secp256k1_ec_seckey_verify(ctx, server_privkey));
-
-    secp256k1_keypair server_keypair;
-
-    return_val = secp256k1_keypair_create(ctx, &server_keypair, server_privkey);
-    assert(return_val);
-
-    secp256k1_pubkey server_pubkey;
-    return_val = secp256k1_keypair_pub(ctx, &server_pubkey, &server_keypair);
-    assert(return_val);
-
-    // Currently only 2-of-2 multi-signature scheme is supported (server and client)
-    // If a federated schema is adopted in the future, this could be changed to n-of-n
-    size_t n_pubkeys = 2;
-
-    secp256k1_xonly_pubkey agg_pk;
-
-    const secp256k1_pubkey *pubkeys_ptr[2];
-
-    pubkeys_ptr[0] = &client_pubkey;
-    pubkeys_ptr[1] = &server_pubkey;
-
-    secp256k1_musig_keyagg_cache cache;
-
-    return_val = secp256k1_musig_pubkey_agg(ctx, NULL, &agg_pk, &cache, pubkeys_ptr, n_pubkeys);
-    assert(return_val);
-
-    memcpy(keyagg_cache, cache.data, sizeof(cache.data));
-
-    unsigned char local_compressed_server_pubkey[33];
-    memset(local_compressed_server_pubkey, 0, 33);
-
-    size_t len = sizeof(local_compressed_server_pubkey);
-    return_val = secp256k1_ec_pubkey_serialize(ctx, local_compressed_server_pubkey, &len, &server_pubkey, SECP256K1_EC_COMPRESSED);
-    assert(return_val);
-    // Should be the same size as the size of the output, because we passed a 33 byte array.
-    assert(len == sizeof(local_compressed_server_pubkey));
-
-    memcpy(compressed_server_pubkey, local_compressed_server_pubkey, 33);
-
-    unsigned char local_compressed_aggregated_pubkey[32];
-    memset(local_compressed_aggregated_pubkey, 0, 32);
-
-    len = sizeof(local_compressed_aggregated_pubkey);
-    return_val = secp256k1_xonly_pubkey_serialize(ctx, local_compressed_aggregated_pubkey, &agg_pk);
-    assert(return_val);
-    assert(len == sizeof(local_compressed_aggregated_pubkey));
-
-    memcpy(compressed_aggregated_pubkey, local_compressed_aggregated_pubkey, 32);
-
-    secp256k1_context_destroy(ctx);
-
-    // Step 3: Calculate sealed data size.
-    if (sealedkeypair_size >= sgx_calc_sealed_data_size(0U, sizeof(server_keypair)))
-    {
-         if ((ret = sgx_seal_data(0U, NULL, sizeof(server_keypair.data), server_keypair.data, (uint32_t) sealedkeypair_size, (sgx_sealed_data_t *)sealedkeypair)) != SGX_SUCCESS)
-         {
-            ocall_print_string("\nTrustedApp: sgx_seal_data() failed !\n");
-         }
-    }
-    else
-    {
-         ocall_print_string("\nTrustedApp: Size allocated for sealedprivkey by untrusted app is less than the required size !\n");
-         ret = SGX_ERROR_INVALID_PARAMETER;
-    }
-
-    // Step 4: Close Context.
-    if (p_ecc_handle != NULL)
-    {
-         sgx_ecc256_close_context(p_ecc_handle);
-    }
-
-    return ret;
-
-}
-
 sgx_status_t generate_new_keypair(
     unsigned char* serialized_client_pubkey, 
     size_t client_pubkey_size,
@@ -385,11 +263,6 @@ sgx_status_t generate_nonce(
     return_val = secp256k1_musig_nonce_gen(ctx, &server_secnonce, &server_pubnonce, session_id, server_seckey, &server_pubkey, msg, NULL, NULL);
     assert(return_val);
 
-    ocall_print_string("--- server_secnonce.data:");
-    int size13 = sizeof(server_secnonce.data);
-    const unsigned char* server_secnonce_data = server_secnonce.data;
-    ocall_print_hex(&server_secnonce_data, &size13);
-
     // step 3 - Seal secret nonce
 
     sgx_status_t ret = SGX_ERROR_UNEXPECTED;
@@ -407,19 +280,9 @@ sgx_status_t generate_nonce(
         ret = SGX_ERROR_INVALID_PARAMETER;
     }
 
-    ocall_print_string("--- server_pubnonce:");
-    int size15 = sizeof(server_pubnonce.data);
-    const unsigned char* server_pubnonce_data_hexxyy = server_pubnonce.data;
-    ocall_print_hex(&server_pubnonce_data_hexxyy, &size15);
-
     unsigned char serialized_server_pubnonce[66];
     return_val = secp256k1_musig_pubnonce_serialize(ctx, serialized_server_pubnonce, &server_pubnonce);
     assert(return_val);
-
-    ocall_print_string("--- serialized_server_pubnonce:");
-    int size14 = sizeof(serialized_server_pubnonce);
-    const unsigned char* serialized_server_pubnonce_hexx = serialized_server_pubnonce;
-    ocall_print_hex(&serialized_server_pubnonce_hexx, &size14);
 
     memcpy(server_pubnonce_data, serialized_server_pubnonce, sizeof(serialized_server_pubnonce));
 
@@ -430,90 +293,6 @@ sgx_status_t generate_nonce(
 }
 
 sgx_status_t get_partial_signature(
-    char* sealed_keypair, size_t sealed_keypair_size,
-    char* sealed_secnonce, size_t sealed_secnonce_size,
-    unsigned char* keyagg_cache_data, size_t keyagg_cache_data_size,
-    unsigned char* session_data, size_t session_data_size,
-    unsigned char* serialized_server_pubnonce, size_t serialized_server_pubnonce_size,
-    unsigned char *partial_sig_data, size_t partial_sig_data_size)
-{
-    (void) partial_sig_data;
-    (void) partial_sig_data_size;
-    (void) serialized_server_pubnonce_size;
-    // step 0 - Unseal sealed keypair
-
-    secp256k1_keypair server_keypair;
-    unseal(sealed_keypair, sealed_keypair_size, server_keypair.data, sizeof(server_keypair.data));
-
-    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
-
-    // step 1 - Extract server secret and public keys from keypair
-
-    unsigned char server_seckey[32];
-    int return_val = secp256k1_keypair_sec(ctx, server_seckey, &server_keypair);
-    assert(return_val);
-
-    secp256k1_pubkey server_pubkey;
-    return_val = secp256k1_keypair_pub(ctx, &server_pubkey, &server_keypair);
-    assert(return_val);
-
-    // step 2 - Unseal sealed sealed_secnonce
-
-    secp256k1_musig_secnonce server_secnonce;
-    unseal(sealed_secnonce, sealed_secnonce_size, server_secnonce.data, sizeof(server_secnonce.data));
-
-    ocall_print_string("--- server_secnonce.data:");
-    int size14 = sizeof(server_secnonce.data);
-    const unsigned char* server_secnonce_data = server_secnonce.data;
-    ocall_print_hex(&server_secnonce_data, &size14);
-
-    secp256k1_musig_keyagg_cache cache;
-    memcpy(cache.data, keyagg_cache_data, keyagg_cache_data_size);
-
-    secp256k1_musig_session session;
-    memcpy(session.data, session_data, session_data_size);
-
-    ocall_print_string("--- cache.data:");
-    int size15 = sizeof(cache.data);
-    const unsigned char* cache_data = cache.data;
-    ocall_print_hex(&cache_data, &size15);
-
-    ocall_print_string("--- session.data:");
-    int size16 = sizeof(session.data);
-    const unsigned char* session_data_hex = session.data;
-    ocall_print_hex(&session_data_hex, &size16);
-
-    secp256k1_musig_pubnonce server_pubnonce;
-    secp256k1_musig_pubnonce_parse(ctx, &server_pubnonce, serialized_server_pubnonce);
-
-    ocall_print_string("--- server_pubnonce:");
-    int size17 = sizeof(server_pubnonce.data);
-    const unsigned char* server_pubnonce_data_hexxyy = server_pubnonce.data;
-    ocall_print_hex(&server_pubnonce_data_hexxyy, &size17);
-
-    secp256k1_musig_partial_sig partial_sig;
-
-    return_val = secp256k1_musig_partial_sign(ctx, &partial_sig, &server_secnonce, &server_keypair, &cache, &session);
-    assert(return_val);
-
-    return_val = secp256k1_musig_partial_sig_verify(ctx, &partial_sig, &server_pubnonce, &server_pubkey, &cache, &session);
-    assert(return_val);
-
-    unsigned char serialized_partial_sig[32];
-    memset(serialized_partial_sig, 0, 32);
-    assert(sizeof(serialized_partial_sig) == partial_sig_data_size);
-
-    return_val = secp256k1_musig_partial_sig_serialize(ctx,serialized_partial_sig, &partial_sig);
-    assert(return_val);   
-
-    memcpy(partial_sig_data, serialized_partial_sig, sizeof(serialized_partial_sig));
-
-    secp256k1_context_destroy(ctx);
-    
-    return SGX_SUCCESS;
-}
-
-sgx_status_t get_blinded_partial_signature(
     char* sealed_keypair, size_t sealed_keypair_size,
     char* sealed_secnonce, size_t sealed_secnonce_size,
     unsigned char* keyaggcoef, size_t keyaggcoef_size,
@@ -548,26 +327,11 @@ sgx_status_t get_blinded_partial_signature(
     secp256k1_musig_secnonce server_secnonce;
     unseal(sealed_secnonce, sealed_secnonce_size, server_secnonce.data, sizeof(server_secnonce.data));
 
-    /* ocall_print_string("--- server_secnonce.data:");
-    int size14 = sizeof(server_secnonce.data);
-    const unsigned char* server_secnonce_data = server_secnonce.data;
-    ocall_print_hex(&server_secnonce_data, &size14); */
-
     secp256k1_musig_session session;
     memcpy(session.data, session_data, session_data_size);
 
-    /* ocall_print_string("--- session.data:");
-    int size16 = sizeof(session.data);
-    const unsigned char* session_data_hex = session.data;
-    ocall_print_hex(&session_data_hex, &size16); */
-
     secp256k1_musig_pubnonce server_pubnonce;
     secp256k1_musig_pubnonce_parse(ctx, &server_pubnonce, serialized_server_pubnonce);
-
-    /* ocall_print_string("--- server_pubnonce:");
-    int size17 = sizeof(server_pubnonce.data);
-    const unsigned char* server_pubnonce_data_hexxyy = server_pubnonce.data;
-    ocall_print_hex(&server_pubnonce_data_hexxyy, &size17); */
 
     secp256k1_musig_partial_sig partial_sig;
 
