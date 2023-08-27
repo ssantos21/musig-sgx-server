@@ -512,3 +512,78 @@ sgx_status_t get_partial_signature(
     
     return SGX_SUCCESS;
 }
+
+sgx_status_t get_blinded_partial_signature(
+    char* sealed_keypair, size_t sealed_keypair_size,
+    char* sealed_secnonce, size_t sealed_secnonce_size,
+    unsigned char* keyaggcoef, size_t keyaggcoef_size,
+    int negate_seckey,
+    unsigned char* session_data, size_t session_data_size,
+    unsigned char* serialized_server_pubnonce, size_t serialized_server_pubnonce_size,
+    unsigned char *partial_sig_data, size_t partial_sig_data_size)
+{
+    (void) partial_sig_data;
+    (void) partial_sig_data_size;
+    (void) serialized_server_pubnonce_size;
+    (void) keyaggcoef_size;
+    // step 0 - Unseal sealed keypair
+
+    secp256k1_keypair server_keypair;
+    unseal(sealed_keypair, sealed_keypair_size, server_keypair.data, sizeof(server_keypair.data));
+
+    secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+
+    // step 1 - Extract server secret and public keys from keypair
+
+    unsigned char server_seckey[32];
+    int return_val = secp256k1_keypair_sec(ctx, server_seckey, &server_keypair);
+    assert(return_val);
+
+    secp256k1_pubkey server_pubkey;
+    return_val = secp256k1_keypair_pub(ctx, &server_pubkey, &server_keypair);
+    assert(return_val);
+
+    // step 2 - Unseal sealed sealed_secnonce
+
+    secp256k1_musig_secnonce server_secnonce;
+    unseal(sealed_secnonce, sealed_secnonce_size, server_secnonce.data, sizeof(server_secnonce.data));
+
+    /* ocall_print_string("--- server_secnonce.data:");
+    int size14 = sizeof(server_secnonce.data);
+    const unsigned char* server_secnonce_data = server_secnonce.data;
+    ocall_print_hex(&server_secnonce_data, &size14); */
+
+    secp256k1_musig_session session;
+    memcpy(session.data, session_data, session_data_size);
+
+    /* ocall_print_string("--- session.data:");
+    int size16 = sizeof(session.data);
+    const unsigned char* session_data_hex = session.data;
+    ocall_print_hex(&session_data_hex, &size16); */
+
+    secp256k1_musig_pubnonce server_pubnonce;
+    secp256k1_musig_pubnonce_parse(ctx, &server_pubnonce, serialized_server_pubnonce);
+
+    /* ocall_print_string("--- server_pubnonce:");
+    int size17 = sizeof(server_pubnonce.data);
+    const unsigned char* server_pubnonce_data_hexxyy = server_pubnonce.data;
+    ocall_print_hex(&server_pubnonce_data_hexxyy, &size17); */
+
+    secp256k1_musig_partial_sig partial_sig;
+
+    return_val = secp256k1_blinded_musig_partial_sign(ctx, &partial_sig, &server_secnonce, &server_keypair, &session, keyaggcoef, negate_seckey);
+    assert(return_val);
+
+    unsigned char serialized_partial_sig[32];
+    memset(serialized_partial_sig, 0, 32);
+    assert(sizeof(serialized_partial_sig) == partial_sig_data_size);
+
+    return_val = secp256k1_musig_partial_sig_serialize(ctx,serialized_partial_sig, &partial_sig);
+    assert(return_val);   
+
+    memcpy(partial_sig_data, serialized_partial_sig, sizeof(serialized_partial_sig));
+
+    secp256k1_context_destroy(ctx);
+    
+    return SGX_SUCCESS;
+}

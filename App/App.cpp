@@ -453,9 +453,6 @@ int SGX_CDECL main(int argc, char *argv[])
                 return crow::response(500, error_message);
             }
 
-            // std::cout << "sealed_keypair.data 2:  " << key_to_string(reinterpret_cast<unsigned char*>(sealed_keypair.data()), sealed_keypair_size) << std::endl;
-            // std::cout << "sealed_secnonce.data 2: " << key_to_string(reinterpret_cast<unsigned char*>(sealed_secnonce.data()), sealed_secnonce_size) << std::endl;
-
             if (message_hash.substr(0, 2) == "0x") {
                 message_hash = message_hash.substr(2);
             }
@@ -585,9 +582,6 @@ int SGX_CDECL main(int argc, char *argv[])
 
             std::cout << "serialized_server_pubnonce:  " << key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce)) << std::endl;
 
-            // secp256k1_musig_keyagg_cache cache;
-            // memcpy(cache.data, serialized_cache.data(), serialized_cache.size());
-
             unsigned char serialized_partial_sig[32];
 
             sgx_status_t ecall_ret;
@@ -613,158 +607,118 @@ int SGX_CDECL main(int argc, char *argv[])
 
     });
 
-    CROW_ROUTE(app, "/key_aggregation")
+    CROW_ROUTE(app, "/get_blinded_partial_signature")
         .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
+
             auto req_body = crow::json::load(req.body);
             if (!req_body)
                 return crow::response(400);
 
-            if (req_body.count("pubkey") == 0)
-                return crow::response(400, "Invalid parameter. It must be 'pubkey'.");
-
-            std::string client_pubkey_hex = req_body["pubkey"].s();
-
-            // Check if the string starts with 0x and remove it if necessary
-            if (client_pubkey_hex.substr(0, 2) == "0x") {
-                client_pubkey_hex = client_pubkey_hex.substr(2);
+            if (req_body.count("server_public_pubkey") == 0 || 
+                req_body.count("keyaggcoef") == 0 ||
+                req_body.count("negate_seckey") == 0 ||
+                req_body.count("session") == 0) {
+                return crow::response(400, "Invalid parameters. They must be 'server_public_pubkey', 'cache' and 'session'.");
             }
 
-            std::vector<unsigned char> client_pubkey_serialized = ParseHex(client_pubkey_hex);
+            std::string server_public_pubkey_hex = req_body["server_public_pubkey"].s();
+            std::string keyaggcoef_hex = req_body["keyaggcoef"].s();
+            int64_t negate_seckey = req_body["negate_seckey"].i();
+            std::string session_hex = req_body["session"].s();
 
-            // 1. Allocate memory for the aggregated pubkey and sealedprivkey.
-            size_t server_pubkey_size = 33; // serialized compressed public keys are 33-byte array
-            unsigned char server_pubkey[server_pubkey_size];
+            std::cout << "server_public_pubkey_hex: " << server_public_pubkey_hex << std::endl;
+            std::cout << "keyaggcoef_hex: " << keyaggcoef_hex << std::endl;
+            std::cout << "negate_seckey: " << negate_seckey << std::endl;
+            std::cout << "session_hex: " << session_hex << std::endl;
 
-            size_t aggregated_pubkey_size = 32; // serialized compressed public keys are 33-byte array
-            unsigned char aggregated_pubkey[aggregated_pubkey_size];
-
-            size_t sealedprivkey_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
-            std::vector<char> sealedprivkey(sealedprivkey_size);  // Using a vector to manage dynamic-sized array.
-
-            const std::lock_guard<std::mutex> lock(mutex_enclave_id);
-
-            secp256k1_musig_keyagg_cache keyagg_cache;
-
-            sgx_status_t ecall_ret;
-            sgx_status_t status = key_aggregation(
-                enclave_id, &ecall_ret, 
-                client_pubkey_serialized.data(), client_pubkey_serialized.size(),
-                server_pubkey, server_pubkey_size,
-                aggregated_pubkey, aggregated_pubkey_size, 
-                keyagg_cache.data, sizeof(keyagg_cache.data),
-                sealedprivkey.data(), sealedprivkey_size);
- 
-            if (ecall_ret != SGX_SUCCESS) {
-                return crow::response(500, "Key aggregation Ecall failed ");
-            }  if (status != SGX_SUCCESS) {
-                return crow::response(500, "Key aggregation failed ");
+            if (server_public_pubkey_hex.substr(0, 2) == "0x") {
+                server_public_pubkey_hex = server_public_pubkey_hex.substr(2);
             }
 
-            auto server_seckey_hex = key_to_string(server_pubkey, server_pubkey_size);
-            auto aggregated_pubkey_hex = key_to_string(aggregated_pubkey, aggregated_pubkey_size);
-            
-            std::string error_message;
-            bool data_saved = save_aggregated_key_data(
-                sealedprivkey.data(), sealedprivkey.size(), aggregated_pubkey, 32, keyagg_cache.data, sizeof(keyagg_cache), error_message);
-
-            if (!data_saved) {
-                error_message = "Failed to save aggregated key data: " + error_message;
-                return crow::response(500, error_message);
+            if (keyaggcoef_hex.substr(0, 2) == "0x") {
+                keyaggcoef_hex = keyaggcoef_hex.substr(2);
             }
 
-            crow::json::wvalue result({{"aggregated_pubkey", aggregated_pubkey_hex}, {"server_pubkey", server_seckey_hex}});
-            return crow::response{result};
-    });
-
-    CROW_ROUTE(app, "/partial_signature")
-        .methods("POST"_method)([&enclave_id, &mutex_enclave_id](const crow::request& req) {
-            
-            auto req_body = crow::json::load(req.body);
-            if (!req_body)
-                return crow::response(400);
-
-            if (req_body.count("aggregated_pubkey") == 0 || 
-                req_body.count("message_hash") == 0 ||
-                req_body.count("pubnonce") == 0) {
-                return crow::response(400, "Invalid parameters. They must be 'aggregated_pubkey' and 'message_hash'.");
+            if (session_hex.substr(0, 2) == "0x") {
+                session_hex = session_hex.substr(2);
             }
 
-            std::string agg_pubkey_hex = req_body["aggregated_pubkey"].s();
-            std::string message_hash = req_body["message_hash"].s();
-            std::string client_pubnonce_hex = req_body["pubnonce"].s();
+            std::vector<unsigned char> serialized_server_public_pubkey = ParseHex(server_public_pubkey_hex);
 
-            if (agg_pubkey_hex.substr(0, 2) == "0x") {
-                agg_pubkey_hex = agg_pubkey_hex.substr(2);
+            if (serialized_server_public_pubkey.size() != 33) {
+                return crow::response(400, "Invalid server public pubkey length. Must be 33 bytes (compressed)!");
             }
 
-            if (message_hash.substr(0, 2) == "0x") {
-                message_hash = message_hash.substr(2);
+            std::vector<unsigned char> serialized_keyaggcoef = ParseHex(keyaggcoef_hex);
+
+            if (serialized_keyaggcoef.size() != 32) {
+                return crow::response(400, "Invalid keyaggcoef length. Must be 32 bytes!");
             }
 
-            if (client_pubnonce_hex.substr(0, 2) == "0x") {
-                client_pubnonce_hex = client_pubnonce_hex.substr(2);
-            }
+            std::vector<unsigned char> serialized_session = ParseHex(session_hex);
 
-            std::vector<unsigned char> serialized_aggregated_pubkey = ParseHex(agg_pubkey_hex);
-
-            if (serialized_aggregated_pubkey.size() != 32) {
-                return crow::response(400, "Invalid aggregated pubkey length. Must be 32 bytes (x-only)!");
+            if (serialized_session.size() != 133) {
+                return crow::response(400, "Invalid session length. Must be 133 bytes!");
             }
 
             size_t sealed_keypair_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
             std::vector<char> sealed_keypair(sealed_keypair_size);  // Using a vector to manage dynamic-sized array.
 
-            secp256k1_musig_keyagg_cache keyagg_cache;
+            size_t sealed_secnonce_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_musig_secnonce));
+            std::vector<char> sealed_secnonce(sealed_secnonce_size);  // Using a vector to manage dynamic-sized array.
+
+            unsigned char serialized_server_pubnonce[66];
+
+            memset(sealed_keypair.data(), 0, sealed_keypair_size);
+            memset(sealed_secnonce.data(), 0, sealed_secnonce_size);
+            memset(serialized_server_pubnonce, 0, sizeof(serialized_server_pubnonce));
 
             std::string error_message;
-            bool data_loaded = load_aggregated_key_data(
-                serialized_aggregated_pubkey.data(), serialized_aggregated_pubkey.size(), 
+            bool data_loaded = load_generated_key_data(
+                serialized_server_public_pubkey.data(), serialized_server_public_pubkey.size(), 
                 sealed_keypair.data(), sealed_keypair_size,
-                keyagg_cache.data, sizeof(keyagg_cache), error_message);
+                sealed_secnonce.data(), sealed_secnonce_size,
+                serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
+                error_message);
 
             if (!data_loaded) {
                 error_message = "Failed to load aggregated key data: " + error_message;
                 return crow::response(500, error_message);
             }
 
-            if (message_hash.size() != 64) {
-                return crow::response(400, "Invalid message hash length. Must be 32 bytes!");
+            bool is_sealed_keypair_empty = std::all_of(sealed_keypair.begin(), sealed_keypair.end(), [](char elem){ return elem == 0; });
+            bool is_sealed_secnonce_empty = std::all_of(sealed_secnonce.begin(), sealed_secnonce.end(), [](char elem){ return elem == 0; });
+
+            if (is_sealed_keypair_empty || is_sealed_secnonce_empty) {
+                return crow::response(400, "Empty sealed keypair or sealed secnonce!");
             }
 
-            unsigned char msg[32];
-            if (!hex_to_bytes(message_hash, msg)) {
-                return crow::response(400, "Invalid message hash!");
-            }
-
-            if (client_pubnonce_hex.size() != 132) {
-                return crow::response(400, "Invalid pubnonce length. Must be 66 bytes!");
-            }
-
-            std::vector<unsigned char> serialized_client_pubnonce = ParseHex(client_pubnonce_hex);
-
-            const std::lock_guard<std::mutex> lock(mutex_enclave_id);
-            sgx_status_t ecall_ret;
+            std::cout << "serialized_server_pubnonce:  " << key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce)) << std::endl;
 
             unsigned char serialized_partial_sig[32];
-            unsigned char serialized_server_pubnonce[66];
 
-            partial_signature(
-                enclave_id, &ecall_ret,
-                serialized_client_pubnonce.data(), serialized_client_pubnonce.size(),
-                msg, sizeof(msg),
-                sealed_keypair.data(), sealed_keypair.size(),
-                keyagg_cache.data, sizeof(keyagg_cache),
-                serialized_partial_sig, 32,
-                serialized_server_pubnonce, 66
-            );
+            sgx_status_t ecall_ret;
+            sgx_status_t status = get_blinded_partial_signature(
+                enclave_id, &ecall_ret, 
+                sealed_keypair.data(), sealed_keypair_size,
+                sealed_secnonce.data(), sealed_secnonce_size,
+                serialized_keyaggcoef.data(), serialized_keyaggcoef.size(),
+                (int) negate_seckey,
+                serialized_session.data(), serialized_session.size(),
+                serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
+                serialized_partial_sig, sizeof(serialized_partial_sig));
 
-            auto pubnonce_hex = key_to_string(serialized_server_pubnonce, sizeof(serialized_server_pubnonce));
+            if (ecall_ret != SGX_SUCCESS) {
+                return crow::response(500, "Generate Signature Ecall failed ");
+            }  if (status != SGX_SUCCESS) {
+                return crow::response(500, "Generate Signature failed ");
+            }
+
             auto partial_sig_hex = key_to_string(serialized_partial_sig, sizeof(serialized_partial_sig));
 
-            crow::json::wvalue result({{"partial_sig", partial_sig_hex}, {"public_nonce", pubnonce_hex}});
+            crow::json::wvalue result({{"partial_sig", partial_sig_hex}});
             return crow::response{result};
-    
-    });
+    });            
 
     app.port(18080).multithreaded().run();
 
