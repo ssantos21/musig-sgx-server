@@ -87,88 +87,7 @@ bool save_generated_public_key(
         return false;
     }
 }
-
 bool load_generated_key_data(
-    unsigned char* server_pubkey, const size_t server_pubkey_size, 
-    char* sealed_keypair, size_t sealed_keypair_size,
-    char* sealed_secnonce, size_t sealed_secnonce_size,
-    unsigned char* public_nonce, const size_t public_nonce_size, 
-    std::string& error_message)
-{
-    try
-    {
-        pqxx::connection conn("postgresql://postgres:postgres@localhost/sgx");
-        if (conn.is_open()) {
-
-            std::basic_string_view<std::byte> server_pubkey_data_view(reinterpret_cast<std::byte*>(server_pubkey), server_pubkey_size);
-
-            std::string sealed_keypair_query =
-                "SELECT sealed_keypair, sealed_secnonce, public_nonce FROM generated_public_key WHERE public_key = $1;";
-
-            pqxx::nontransaction ntxn(conn);
-
-            conn.prepare("load_generated_key_data_query", sealed_keypair_query);
-
-            pqxx::result result = ntxn.exec_prepared("load_generated_key_data_query", server_pubkey_data_view);
-
-            if (!result.empty()) {
-                auto sealed_keypair_field = result[0]["sealed_keypair"];
-                auto sealed_secnonce_field = result[0]["sealed_secnonce"];
-                auto public_nonce_field = result[0]["public_nonce"];
-
-                if (!sealed_keypair_field.is_null()) {
-                    auto sealed_keypair_view = sealed_keypair_field.as<std::basic_string<std::byte>>();
-                    
-                    if (sealed_keypair_view.size() != sealed_keypair_size) {
-                        error_message = "Failed to retrieve keypair. Different size than expected !";
-                        return false;
-                    }
-
-                    memcpy(sealed_keypair, sealed_keypair_view.data(), sealed_keypair_size);
-                }
-
-                if (!sealed_secnonce_field.is_null()) {
-                    auto sealed_secnonce_view = sealed_secnonce_field.as<std::basic_string<std::byte>>();
-
-                    if (sealed_secnonce_view.size() != sealed_secnonce_size) {
-                        error_message = "Failed to retrieve secret nonce. Different size than expected !";
-                        return false;
-                    }
-
-                    memcpy(sealed_secnonce, sealed_secnonce_view.data(), sealed_secnonce_size);
-                }
-
-                if (!public_nonce_field.is_null()) {
-                    auto public_nonce_view = public_nonce_field.as<std::basic_string<std::byte>>();
-
-                    if (public_nonce_view.size() != public_nonce_size) {
-                        error_message = "Failed to retrieve public nonce. Different size than expected !";
-                        return false;
-                    }
-
-                    memcpy(public_nonce, public_nonce_view.data(), public_nonce_size);
-                }
-            }
-            else {
-                error_message = "Failed to retrieve keypair. No data found !";
-                return false;
-            }
-
-            conn.close();
-            return true;
-        } else {
-            error_message = "Failed to connect to the database!";
-            return false;
-        }
-    }
-    catch (std::exception const &e)
-    {
-        error_message = e.what();
-        return false;
-    }
-}
-
-bool load_generated_key_data2(
     std::string& statechain_id, 
     char* sealed_keypair, size_t sealed_keypair_size,
     char* sealed_secnonce, size_t sealed_secnonce_size,
@@ -496,7 +415,7 @@ int SGX_CDECL main(int argc, char *argv[])
             // std::cout << "sealed_secnonce.data 1: " << key_to_string(reinterpret_cast<unsigned char*>(sealed_secnonce.data()), sealed_secnonce_size) << std::endl;
 
             std::string error_message;
-            bool data_loaded = load_generated_key_data2(
+            bool data_loaded = load_generated_key_data(
                 statechain_id,
                 sealed_keypair.data(), sealed_keypair_size,
                 sealed_secnonce.data(), sealed_secnonce_size,
@@ -549,21 +468,17 @@ int SGX_CDECL main(int argc, char *argv[])
             if (!req_body)
                 return crow::response(400);
 
-            if (req_body.count("server_public_pubkey") == 0 || 
+            if (req_body.count("statechain_id") == 0 || 
                 req_body.count("keyaggcoef") == 0 ||
                 req_body.count("negate_seckey") == 0 ||
                 req_body.count("session") == 0) {
-                return crow::response(400, "Invalid parameters. They must be 'server_public_pubkey', 'cache' and 'session'.");
+                return crow::response(400, "Invalid parameters. They must be 'statechain_id', 'keyaggcoef', 'negate_seckey' and 'session'.");
             }
 
-            std::string server_public_pubkey_hex = req_body["server_public_pubkey"].s();
+            std::string statechain_id = req_body["statechain_id"].s();
             std::string keyaggcoef_hex = req_body["keyaggcoef"].s();
             int64_t negate_seckey = req_body["negate_seckey"].i();
             std::string session_hex = req_body["session"].s();
-
-            if (server_public_pubkey_hex.substr(0, 2) == "0x") {
-                server_public_pubkey_hex = server_public_pubkey_hex.substr(2);
-            }
 
             if (keyaggcoef_hex.substr(0, 2) == "0x") {
                 keyaggcoef_hex = keyaggcoef_hex.substr(2);
@@ -571,12 +486,6 @@ int SGX_CDECL main(int argc, char *argv[])
 
             if (session_hex.substr(0, 2) == "0x") {
                 session_hex = session_hex.substr(2);
-            }
-
-            std::vector<unsigned char> serialized_server_public_pubkey = ParseHex(server_public_pubkey_hex);
-
-            if (serialized_server_public_pubkey.size() != 33) {
-                return crow::response(400, "Invalid server public pubkey length. Must be 33 bytes (compressed)!");
             }
 
             std::vector<unsigned char> serialized_keyaggcoef = ParseHex(keyaggcoef_hex);
@@ -605,7 +514,7 @@ int SGX_CDECL main(int argc, char *argv[])
 
             std::string error_message;
             bool data_loaded = load_generated_key_data(
-                serialized_server_public_pubkey.data(), serialized_server_public_pubkey.size(), 
+                statechain_id, 
                 sealed_keypair.data(), sealed_keypair_size,
                 sealed_secnonce.data(), sealed_secnonce_size,
                 serialized_server_pubnonce, sizeof(serialized_server_pubnonce),
