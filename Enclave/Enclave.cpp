@@ -217,13 +217,11 @@ sgx_status_t partial_signature(
 }
 
 sgx_status_t generate_nonce(
-    unsigned char* msg, size_t msg_size,
     char* sealed_keypair, size_t sealed_keypair_size,
     char* sealed_secnonce, size_t sealed_secnonce_size,
     unsigned char* server_pubnonce_data, size_t server_pubnonce_data_size)
 {
     // TODO: replace with assert
-    (void) msg_size;
     (void) sealed_keypair_size;
     (void) sealed_secnonce_size;
     (void) server_pubnonce_data_size;
@@ -252,7 +250,7 @@ sgx_status_t generate_nonce(
     secp256k1_musig_pubnonce server_pubnonce;
     secp256k1_musig_secnonce server_secnonce;
 
-    return_val = secp256k1_musig_nonce_gen(ctx, &server_secnonce, &server_pubnonce, session_id, server_seckey, &server_pubkey, msg, NULL, NULL);
+    return_val = secp256k1_musig_nonce_gen(ctx, &server_secnonce, &server_pubnonce, session_id, server_seckey, &server_pubkey, NULL, NULL, NULL);
     assert(return_val);
 
     // step 3 - Seal secret nonce
