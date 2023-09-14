@@ -12,8 +12,8 @@ Build and run this application as follows.
 
 ```
 # clone this repo
-$ git clone https://github.com/tsmatz/intel-sgx-enclave-ubuntu-tutorial
-$ cd intel-sgx-enclave-ubuntu-tutorial
+$ git clone https://github.com/ssantos21/blinded-musig-sgx-server
+$ cd blinded-musig-sgx-server
 # build application (simulator mode)
 $ make SGX_MODE=SIM INCLUDE_SECP256K1_ZKP=1
 # run application

@@ -11,9 +11,6 @@
 #include "sgx_tseal.h"
 
 sgx_status_t generate_new_keypair(
-    unsigned char* serialized_client_pubkey, 
-    size_t client_pubkey_size,
-
     unsigned char *compressed_server_pubkey, 
     size_t compressed_server_pubkey_size, 
     
@@ -38,11 +35,6 @@ sgx_status_t generate_new_keypair(
 
     secp256k1_context* ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
 
-    // serialized_client_pubkey MUST be validated before this function
-    secp256k1_pubkey client_pubkey;
-    int return_val = secp256k1_ec_pubkey_parse(ctx, &client_pubkey, serialized_client_pubkey, client_pubkey_size);
-    assert(return_val);
-
     unsigned char server_privkey[32];
     memset(server_privkey, 0, 32);
 
@@ -52,7 +44,7 @@ sgx_status_t generate_new_keypair(
 
     secp256k1_keypair server_keypair;
 
-    return_val = secp256k1_keypair_create(ctx, &server_keypair, server_privkey);
+    int return_val = secp256k1_keypair_create(ctx, &server_keypair, server_privkey);
     assert(return_val);
 
     secp256k1_pubkey server_pubkey;

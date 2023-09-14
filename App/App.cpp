@@ -42,6 +42,7 @@ uint32_t sgx_calc_sealed_data_size(const uint32_t add_mac_txt_size, const uint32
 bool save_generated_public_key(
     char* sealed, size_t sealed_size, 
     unsigned char* server_public_key, size_t server_public_key_size,
+    std::string& statechain_id,
     std::string& error_message) 
 {
     try
@@ -52,10 +53,12 @@ bool save_generated_public_key(
             std::string create_table_query =
                 "CREATE TABLE IF NOT EXISTS generated_public_key ( "
                 "id SERIAL PRIMARY KEY, "
+                "statechain_id varchar(50), "
                 "sealed_keypair BYTEA, "
                 "sealed_secnonce BYTEA, "
                 "public_nonce BYTEA, "
-                "public_key BYTEA UNIQUE);";
+                "public_key BYTEA UNIQUE, "
+                "sig_count INTEGER DEFAULT 0);";
 
             pqxx::work txn(conn);
             txn.exec(create_table_query);
@@ -65,10 +68,10 @@ bool save_generated_public_key(
             std::basic_string_view<std::byte> public_key_data_view(reinterpret_cast<std::byte*>(server_public_key), server_public_key_size);
 
             std::string insert_query =
-                "INSERT INTO generated_public_key (sealed_keypair, public_key) VALUES ($1, $2);";
+                "INSERT INTO generated_public_key (sealed_keypair, public_key, statechain_id) VALUES ($1, $2, $3);";
             pqxx::work txn2(conn);
 
-            txn2.exec_params(insert_query, sealed_data_view, public_key_data_view);
+            txn2.exec_params(insert_query, sealed_data_view, public_key_data_view, statechain_id);
             txn2.commit();
 
             conn.close();
@@ -345,24 +348,14 @@ int SGX_CDECL main(int argc, char *argv[])
             if (!req_body)
                 return crow::response(400);
 
-            if (req_body.count("client_pubkey") == 0)
+            if (req_body.count("statechain_id") == 0)
                 return crow::response(400, "Invalid parameter. It must be 'client_pubkey'.");
 
-            std::string client_pubkey_hex = req_body["client_pubkey"].s();
-
-            // Check if the string starts with 0x and remove it if necessary
-            if (client_pubkey_hex.substr(0, 2) == "0x") {
-                client_pubkey_hex = client_pubkey_hex.substr(2);
-            }
-
-            std::vector<unsigned char> client_pubkey_serialized = ParseHex(client_pubkey_hex);
+            std::string statechain_id = req_body["statechain_id"].s();
 
             // 1. Allocate memory for the aggregated pubkey and sealedprivkey.
             size_t server_pubkey_size = 33; // serialized compressed public keys are 33-byte array
             unsigned char server_pubkey[server_pubkey_size];
-
-            // size_t sealedprivkey_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
-            // std::vector<char> sealedprivkey(sealedprivkey_size);  // Using a vector to manage dynamic-sized array.
 
             size_t sealedprivkey_size = sgx_calc_sealed_data_size(0U, sizeof(secp256k1_keypair));
             char sealedprivkey[sealedprivkey_size];
@@ -372,9 +365,7 @@ int SGX_CDECL main(int argc, char *argv[])
             sgx_status_t ecall_ret;
             sgx_status_t status = generate_new_keypair(
                 enclave_id, &ecall_ret, 
-                client_pubkey_serialized.data(), client_pubkey_serialized.size(),
                 server_pubkey, server_pubkey_size,
-                // sealedprivkey.data(), sealedprivkey_size);
                 sealedprivkey, sealedprivkey_size);
 
             if (ecall_ret != SGX_SUCCESS) {
@@ -388,7 +379,7 @@ int SGX_CDECL main(int argc, char *argv[])
             std::string error_message;
             bool data_saved = save_generated_public_key(
                 // sealedprivkey.data(), sealedprivkey.size(), server_pubkey, server_pubkey_size, error_message);
-                sealedprivkey, sealedprivkey_size, server_pubkey, server_pubkey_size, error_message);
+                sealedprivkey, sealedprivkey_size, server_pubkey, server_pubkey_size, statechain_id, error_message);
 
             if (!data_saved) {
                 error_message = "Failed to save aggregated key data: " + error_message;

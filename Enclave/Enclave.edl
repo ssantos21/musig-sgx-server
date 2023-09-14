@@ -5,8 +5,6 @@ enclave {
 
     trusted {
         public sgx_status_t generate_new_keypair(
-            [in, size=client_pubkey_size] unsigned char* serialized_client_pubkey, 
-            size_t client_pubkey_size,
             [out, size=compressed_server_pubkey_size] unsigned char *compressed_server_pubkey, 
             size_t compressed_server_pubkey_size, 
             [out, size=sealedkeypair_size] char* sealedkeypair, 
